@@ -1,0 +1,17 @@
+# 凭据文件（含 cookie，切勿提交）/ Credentials (contains cookie, never commit)
+config.json
+
+# 日志 / Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 编辑器 / Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store

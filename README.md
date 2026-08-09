@@ -49,7 +49,7 @@ playwright install --with-deps chromium
 
 ```json
 {
-  "cookie": "bbs_auth=...; bbs_csrf=...",
+  "cookie": "<your full cookie string here>",
   "uid": 12345
 }
 ```

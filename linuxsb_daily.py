@@ -356,6 +356,12 @@ def main():
                 for t in topics:
                     tid = t["tid"]; title = t["title"][:50]
                     try:
+                        if tid in state.get("replies", {}) and state["replies"][tid].get("body"):
+                            log(f"[{tid}] skip=tracked(state) {title}")
+                            skip += 1
+                            detail.append(f"跳过(已记录) #{tid} {title[:24]}")
+                            time.sleep(3)
+                            continue
                         r = process_topic(page, tid, title, uid)
                         if r in ("ended", "no-form", "not-lottery"):
                             log(f"[{tid}] skip={r} {title}")

@@ -1,8 +1,8 @@
 # linuxsb-auto-reply | linux.sb 抽奖帖自动回帖
 
-> 自动参与 linux.sb 论坛抽奖帖的回帖脚本（白天定时运行，夜间自动跳过）。
+> 自动参与 linux.sb 论坛抽奖帖的回帖脚本（白天定时运行，夜间自动跳过），附带每日签到与开奖结果跟踪。
 >
-> Auto-reply script for linux.sb lottery topics — runs on a daytime schedule, auto-skips at night.
+> Auto-reply script for linux.sb lottery topics — runs on a daytime schedule, auto-skips at night. Also handles the daily check-in and lottery result tracking.
 
 ---
 
@@ -16,11 +16,13 @@
 
 ## 工作原理 / How It Works
 
-1. 抓取首页所有含抽奖关键词且未结束的帖子 / Scrape homepage for open lottery topics
-2. 检测夜间守护（Cloudflare Turnstile）/ Detect night-guard (Cloudflare Turnstile)
-3. **夜间 → 跳过本次**（白天才回帖）/ **Night → skip** (daytime only)
-4. **白天 → 逐个帖子**：检查状态/已回帖 → 生成内容 → fetch 提交 / **Day → per topic**: check status/replied → generate → fetch submit
-5. 回帖 API：`POST /reply_edit`，字段 `_csrf` + `topic_id` + `body` → `{"ok":1}` / Reply API: `POST /reply_edit`
+1. **签到**：每天首次运行时提交 `/daily_checkin`（`_csrf` 表单），已签到则自动跳过 / **Check-in**: submit `/daily_checkin` (`_csrf` form) on first run of the day; idempotent
+2. 抓取首页所有含抽奖关键词且未结束的帖子 / Scrape homepage for open lottery topics
+3. 检测夜间守护（Cloudflare Turnstile）/ Detect night-guard (Cloudflare Turnstile)
+4. **夜间 → 跳过回帖**（白天才回帖；签到与开奖检查不受影响）/ **Night → skip replies** (daytime only; check-in & result checks still run)
+5. **白天 → 逐个帖子**：检查状态/已回帖 → 生成内容 → fetch 提交 / **Day → per topic**: check status/replied → generate → fetch submit
+6. 回帖 API：`POST /reply_edit`，字段 `_csrf` + `topic_id` + `body` → `{"ok":1}` / Reply API: `POST /reply_edit`
+7. **开奖跟踪**：已回帖的帖子记录到本地 `state.json`，每次运行检查开奖状态，命中中奖名单（按 UID 匹配）推送「中奖」通知 / **Winner tracking**: replied topics are recorded to local `state.json`; each run checks results, and a WON push fires if your UID is in the winners list
 
 ---
 
@@ -45,6 +47,8 @@ playwright install --with-deps chromium
 - `LINUXSB_COOKIE` — 完整 cookie 字符串 / full cookie string
 - `LINUXSB_UID` — 你的数字用户 ID / your numeric user ID
 - `LINUXSB_PUSHPLUS_TOKEN` — PushPlus 推送 token（可选，青龙面板同款）/ PushPlus token, optional (Qinglong-style)
+- `LINUXSB_STATE` — 状态文件路径（默认 `~/.config/linuxsb/state.json`）/ tracking state path (default `~/.config/linuxsb/state.json`)
+- `LINUXSB_STATE_TTL_DAYS` — 已回帖记录保留天数（默认 3；开奖结果长期可查，但记录过期自动清理）/ tracking record TTL days (default 3; results are long-lived on the forum, but local records auto-clean after TTL)
 
 或 `config.json`（默认 `~/.config/linuxsb/config.json`）/ Or `config.json` (default `~/.config/linuxsb/config.json`):
 
@@ -76,8 +80,8 @@ python linuxsb_daily.py
 
 ## 推送通知 / Notifications
 
-**中文**：每次运行结束会生成运行总结（抽奖帖数 / 成功 / 跳过 / 失败 + 明细），参考青龙面板的 PushPlus 推送方式发送到你的微信。配置 `LINUXSB_PUSHPLUS_TOKEN` 或 config.json 的 `pushplus_token` 即启用；未配置则跳过推送。
-**English**: After each run, a summary (topics / ok / skip / fail + details) is pushed to your WeChat via PushPlus, the same way Qinglong does it. Set `LINUXSB_PUSHPLUS_TOKEN` or `pushplus_token` in config.json to enable; skipped if not set.
+**中文**：每次运行结束会生成运行总结（签到 / 抽奖帖数 / 成功 / 跳过 / 失败 + 开奖结果 + 明细），参考青龙面板的 PushPlus 推送方式发送到你的微信。配置 `LINUXSB_PUSHPLUS_TOKEN` 或 config.json 的 `pushplus_token` 即启用；未配置则跳过推送。若本轮检测到中奖，推送标题变为 `[中奖]` 醒目提示。
+**English**: After each run, a summary (check-in / topics / ok / skip / fail + lottery results + details) is pushed to your WeChat via PushPlus, the same way Qinglong does it. Set `LINUXSB_PUSHPLUS_TOKEN` or `pushplus_token` in config.json to enable; skipped if not set. If a win is detected, the push title becomes `[中奖]` (WON) as a highlight.
 
 ---
 

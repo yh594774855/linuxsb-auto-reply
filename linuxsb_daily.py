@@ -3,10 +3,13 @@
 linux.sb 论坛抽奖帖自动回帖脚本（脱敏版）
 Auto-reply script for linux.sb lottery topics (sanitized version)
 
-凭据（cookie / UID）从环境变量或 config.json 读取，不硬编码个人信息。
-Credentials (cookie / UID) are read from env vars or config.json, no hardcoded personal info.
+凭据（cookie / UID / PushPlus token）从环境变量或 config.json 读取，不硬编码个人信息。
+Credentials (cookie / UID / PushPlus token) are read from env vars or config.json, no hardcoded personal info.
+
+推送方式参考青龙面板（Qinglong-style PushPlus notification）。
 """
 import os, sys, time, json, random
+import urllib.request
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 
@@ -20,6 +23,7 @@ def load_config():
     cookie = os.environ.get("LINUXSB_COOKIE")
     uid = os.environ.get("LINUXSB_UID")
     ua = os.environ.get("LINUXSB_UA", DEFAULT_UA)
+    ptoken = os.environ.get("LINUXSB_PUSHPLUS_TOKEN")
     if not cookie or not uid:
         try:
             with open(CONFIG_PATH) as f:
@@ -27,6 +31,7 @@ def load_config():
             cookie = cookie or cfg.get("cookie")
             uid = uid or str(cfg.get("uid", ""))
             ua = cfg.get("user_agent", ua)
+            ptoken = ptoken or cfg.get("pushplus_token")
         except FileNotFoundError:
             pass
     if not cookie or not uid:
@@ -34,7 +39,7 @@ def load_config():
         print(f"       config path: {CONFIG_PATH}", flush=True)
         print("       See config.example.json for format / 配置格式见 config.example.json", flush=True)
         sys.exit(1)
-    return cookie, uid, ua
+    return cookie, uid, ua, ptoken
 
 
 def log(msg):
@@ -45,6 +50,26 @@ def log(msg):
             f.write(line + "\n")
     except Exception:
         pass
+
+
+def send_pushplus(token, title, content):
+    """参考青龙面板推送方式：PushPlus 推送 / Qinglong-style PushPlus notification."""
+    if not token:
+        log("无 PushPlus token，跳过推送 / no PushPlus token, skip notification")
+        return False
+    payload = json.dumps({"token": token, "title": title, "content": content, "template": "txt"}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://www.pushplus.plus/send", data=payload,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = r.read().decode("utf-8")
+            log(f"推送结果 / push result: {resp[:120]}")
+            return '"code":200' in resp or '请求成功' in resp
+    except Exception as e:
+        log(f"推送失败 / push failed: {e}")
+        return False
 
 
 def parse_cookies(s, domain):
@@ -140,8 +165,12 @@ def process_topic(page, tid, title, uid):
 
 
 def main():
-    cookie, uid, ua = load_config()
+    cookie, uid, ua, ptoken = load_config()
     log("=== 开始运行 / run started ===")
+    detail = []
+    ok = skip = fail = 0
+    topics = []
+    night = False
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"])
         ctx = browser.new_context(user_agent=ua, viewport={"width": 1280, "height": 800}, locale="zh-CN")
@@ -149,36 +178,48 @@ def main():
         page = ctx.new_page()
         topics = get_lottery_topics(page)
         log(f"首页抽奖帖(未结束) / open lottery topics: {len(topics)}")
-        if not topics:
-            log("无抽奖帖，退出 / no lottery topics, exit")
-            browser.close()
-            return
-        ng = check_night(page, topics[0]["tid"])
-        log(f"夜间守护 / night guard: night={ng['night']} turnstile={ng['turnstile']}")
-        if ng["night"] or ng["turnstile"]:
-            log("夜间守护中，跳过本次（白天才回帖）/ night guard active, skipping (daytime only)")
-            browser.close()
-            return
-        ok = 0; skip = 0; fail = 0
-        for t in topics:
-            tid = t["tid"]; title = t["title"][:50]
-            try:
-                r = process_topic(page, tid, title, uid)
-                if r in ("ended", "replied", "no-form", "not-lottery"):
-                    log(f"[{tid}] skip={r} {title}")
-                    skip += 1
-                elif isinstance(r, dict) and r.get("ok"):
-                    log(f"[{tid}] OK '{r['body']}' {title}")
-                    ok += 1
-                else:
-                    log(f"[{tid}] FAIL {r} {title}")
-                    fail += 1
-                time.sleep(3)
-            except Exception as e:
-                log(f"[{tid}] ERROR {e}")
-                fail += 1
-        log(f"汇总 / summary: 成功 ok={ok} 跳过 skip={skip} 失败 fail={fail}")
+        if topics:
+            ng = check_night(page, topics[0]["tid"])
+            night = ng["night"] or ng["turnstile"]
+            log(f"夜间守护 / night guard: night={ng['night']} turnstile={ng['turnstile']}")
+            if night:
+                log("夜间守护中，跳过本次（白天才回帖）/ night guard active, skipping (daytime only)")
+            else:
+                for t in topics:
+                    tid = t["tid"]; title = t["title"][:50]
+                    try:
+                        r = process_topic(page, tid, title, uid)
+                        if r in ("ended", "replied", "no-form", "not-lottery"):
+                            log(f"[{tid}] skip={r} {title}")
+                            skip += 1
+                            detail.append(f"跳过({r}) #{tid} {title[:24]}")
+                        elif isinstance(r, dict) and r.get("ok"):
+                            log(f"[{tid}] OK '{r['body']}' {title}")
+                            ok += 1
+                            detail.append(f"回帖成功 #{tid} {r['body']} | {title[:24]}")
+                        else:
+                            log(f"[{tid}] FAIL {r} {title}")
+                            fail += 1
+                            detail.append(f"失败 #{tid} {title[:24]}")
+                        time.sleep(3)
+                    except Exception as e:
+                        log(f"[{tid}] ERROR {e}")
+                        fail += 1
+                        detail.append(f"异常 #{tid} {e}")
+        else:
+            log("无抽奖帖 / no lottery topics")
         browser.close()
+    summary = (
+        f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        f"抽奖帖数: {len(topics)} | 成功: {ok} | 跳过: {skip} | 失败: {fail}\n"
+    )
+    if night:
+        summary = "夜间守护中，本次仅巡检未回帖\n" + summary
+    log(f"汇总 / summary: 成功 ok={ok} 跳过 skip={skip} 失败 fail={fail}")
+    if ptoken:
+        title = f"linuxsb回帖 成功{ok} 跳过{skip} 失败{fail}"
+        content = summary + ("\n".join(detail[-15:]) if detail else "")
+        send_pushplus(ptoken, title, content)
     log("=== 结束 / finished ===")
 
 

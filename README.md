@@ -44,13 +44,15 @@ playwright install --with-deps chromium
 环境变量 / Env vars:
 - `LINUXSB_COOKIE` — 完整 cookie 字符串 / full cookie string
 - `LINUXSB_UID` — 你的数字用户 ID / your numeric user ID
+- `LINUXSB_PUSHPLUS_TOKEN` — PushPlus 推送 token（可选，青龙面板同款）/ PushPlus token, optional (Qinglong-style)
 
 或 `config.json`（默认 `~/.config/linuxsb/config.json`）/ Or `config.json` (default `~/.config/linuxsb/config.json`):
 
 ```json
 {
   "cookie": "<your full cookie string here>",
-  "uid": 12345
+  "uid": 12345,
+  "pushplus_token": "<your PushPlus token, optional>"
 }
 ```
 
@@ -65,12 +67,17 @@ playwright install --with-deps chromium
 python linuxsb_daily.py
 ```
 
-定时（cron，北京白天每 3 小时）/ Schedule (cron, every 3h Beijing daytime):
+定时（cron，北京白天每 2 小时）/ Schedule (cron, every 2h Beijing daytime):
 ```
-0 8,11,14,17,20 * * * /usr/bin/python3 /path/to/linuxsb_daily.py > /dev/null 2>&1
+0 8,10,12,14,16,18,20 * * * /usr/bin/python3 /path/to/linuxsb_daily.py > /dev/null 2>&1
 ```
 
 日志 / Log: 默认 `/root/linuxsb_reply.log`（可设 `LINUXSB_LOG`）/ Default `/root/linuxsb_reply.log` (set `LINUXSB_LOG`).
+
+## 推送通知 / Notifications
+
+**中文**：每次运行结束会生成运行总结（抽奖帖数 / 成功 / 跳过 / 失败 + 明细），参考青龙面板的 PushPlus 推送方式发送到你的微信。配置 `LINUXSB_PUSHPLUS_TOKEN` 或 config.json 的 `pushplus_token` 即启用；未配置则跳过推送。
+**English**: After each run, a summary (topics / ok / skip / fail + details) is pushed to your WeChat via PushPlus, the same way Qinglong does it. Set `LINUXSB_PUSHPLUS_TOKEN` or `pushplus_token` in config.json to enable; skipped if not set.
 
 ---
 

@@ -3,5 +3,6 @@
   "_comment_path": "默认路径 ~/.config/linuxsb/config.json / Default path ~/.config/linuxsb/config.json",
   "cookie": "YOUR_LINUXSB_COOKIE_STRING_HERE",
   "uid": 12345,
-  "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+  "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "pushplus_token": "YOUR_PUSHPLUS_TOKEN_OPTIONAL"
 }

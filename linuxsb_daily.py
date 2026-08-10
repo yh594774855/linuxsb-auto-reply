@@ -81,17 +81,60 @@ def parse_cookies(s, domain):
     return out
 
 
+REPLY_POOL = {
+    "lottery": [
+        "参与抽奖，感谢分享",
+        "感谢分享，参与抽奖",
+        "支持活动，参与抽奖",
+        "参与一下期待中奖",
+        "期待一下中奖，我来参与",
+        "支持楼主，我也来参与抽奖",
+        "前排占楼，希望中彩票",
+        "抽奖必须参与一下",
+        "这个抽奖太给力了，必须参加",
+        "抽奖不封号太棒了",
+        "已经严肃参与抽奖",
+        "我来参与了，祝老板发财",
+        "非必要不抽奖，但这个必须参与",
+    ],
+    "welfare": [
+        "感谢福利，支持一下",
+        "感谢分享，支持活动",
+        "感谢大佬的支持",
+        "感谢老板的福利",
+        "谢谢大佬，参与一下",
+        "我来支持一下",
+        "支持楼主，感谢分享",
+        "福利不错，感谢楼主",
+    ],
+    "register": [
+        "支持入驻，参与一下",
+        "感谢分享，支持入驻",
+        "抽中就来注册啦，感谢感谢",
+        "已注册，支持一下",
+        "注册参与，感谢分享",
+    ],
+    "default": [
+        "感谢分享，参与一下",
+        "支持一下，感谢分享",
+        "我来看看什么水平",
+        "参与一下，支持",
+        "感谢分享，支持一下",
+    ],
+}
+
+
 def gen_reply(title):
     """根据标题生成 ≥5 字的回复 / Generate a reply (>=5 chars) based on title."""
     t = title
     if "抽奖" in t or "抽" in t:
-        return random.choice(["参与抽奖，感谢分享", "感谢分享，参与抽奖", "支持活动，参与抽奖"])
+        return random.choice(REPLY_POOL["lottery"])
     elif "送" in t or "福利" in t:
-        return random.choice(["感谢福利，支持一下", "感谢分享，支持活动"])
+        return random.choice(REPLY_POOL["welfare"])
     elif "注册" in t or "入驻" in t:
-        return random.choice(["支持入驻，参与一下", "感谢分享，支持入驻"])
+        return random.choice(REPLY_POOL["register"])
     else:
-        return random.choice(["感谢分享，参与一下", "支持一下，感谢分享"])
+        return random.choice(REPLY_POOL["default"])
 
 
 def get_lottery_topics(page):

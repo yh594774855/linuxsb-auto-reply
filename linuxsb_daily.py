@@ -282,6 +282,15 @@ def daily_checkin(page):
     return {"ok": ok, "already": False, "status": resp.get("status"), "head": resp.get("head")}
 
 
+def check_login(page, uid):
+    """检测当前 cookie 登录态是否有效 / Check whether the session cookie is still valid."""
+    return page.evaluate("""(uid) => {
+        const loginLinks = document.querySelectorAll('a[href="/login"]');
+        const myLinks = document.querySelectorAll('a[href^="/user/' + uid + '"], .nav-mine, a.user-name');
+        return {hasLogin: loginLinks.length > 0, hasUser: myLinks.length > 0, loggedIn: myLinks.length > 0};
+    }""", uid)
+
+
 def process_topic(page, tid, title, uid):
     """处理单个帖子：检查状态/已回帖 → 生成内容 → fetch 提交 / Process one topic."""
     page.goto(f"https://linux.sb/topic/{tid}", wait_until="domcontentloaded", timeout=20000)
@@ -346,6 +355,18 @@ def main():
             log(f"签到异常 / checkin error: {e}")
         topics = get_lottery_topics(page)
         log(f"首页抽奖帖(未结束) / open lottery topics: {len(topics)}")
+        try:
+            auth = check_login(page, uid)
+            log(f"登录态 / login state: logged_in={auth['loggedIn']} hasUser={auth['hasUser']} hasLogin={auth['hasLogin']}")
+        except Exception as e:
+            auth = {"loggedIn": True}
+            log(f"登录态检测异常 / login check error: {e}")
+        if not auth.get("loggedIn", True):
+            log("!!! cookie 已失效 / session cookie expired, aborting")
+            if ptoken:
+                send_pushplus(ptoken, "[cookie失效] linux.sb 会话过期", "linuxsb 脚本检测到 cookie 已失效，请用油猴脚本重新提取 cookie 并更新 ~/.config/linuxsb/config.json，然后手动运行一次验证。")
+            browser.close()
+            return
         if topics:
             ng = check_night(page, topics[0]["tid"])
             night = ng["night"] or ng["turnstile"]

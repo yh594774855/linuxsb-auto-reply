@@ -26,6 +26,7 @@ def load_config():
     uid = os.environ.get("LINUXSB_UID")
     ua = os.environ.get("LINUXSB_UA", DEFAULT_UA)
     ptoken = os.environ.get("LINUXSB_PUSHPLUS_TOKEN")
+    username = os.environ.get("LINUXSB_USERNAME")
     if not cookie or not uid:
         try:
             with open(CONFIG_PATH) as f:
@@ -34,6 +35,7 @@ def load_config():
             uid = uid or str(cfg.get("uid", ""))
             ua = cfg.get("user_agent", ua)
             ptoken = ptoken or cfg.get("pushplus_token")
+            username = username or cfg.get("username")
         except FileNotFoundError:
             pass
     if not cookie or not uid:
@@ -41,7 +43,7 @@ def load_config():
         print(f"       config path: {CONFIG_PATH}", flush=True)
         print("       See config.example.json for format / 配置格式见 config.example.json", flush=True)
         sys.exit(1)
-    return cookie, uid, ua, ptoken
+    return cookie, uid, ua, ptoken, username or f"uid{uid}"
 
 
 def log(msg):
@@ -328,7 +330,7 @@ def process_topic(page, tid, title, uid):
 
 
 def main():
-    cookie, uid, ua, ptoken = load_config()
+    cookie, uid, ua, ptoken, username = load_config()
     log("=== 开始运行 / run started ===")
     detail = []
     ok = skip = fail = 0
@@ -342,14 +344,22 @@ def main():
         ctx = browser.new_context(user_agent=ua, viewport={"width": 1280, "height": 800}, locale="zh-CN")
         ctx.add_cookies(parse_cookies(cookie, ".linux.sb"))
         page = ctx.new_page()
+        today = datetime.now().strftime("%Y-%m-%d")
         try:
-            checkin_info = daily_checkin(page)
-            if checkin_info.get("already"):
-                log("签到 / checkin: 今日已签到 / already checked in today")
-            elif checkin_info.get("ok"):
-                log("签到 / checkin: 签到成功 / checkin success")
+            if state.get("checkin_date") == today:
+                checkin_info = {"ok": True, "already": True, "state_skip": True}
+                log("签到 / checkin: 今天已在 state 记录过，跳过 / already recorded in state today, skip")
             else:
-                log(f"签到 / checkin: 失败 {checkin_info}")
+                checkin_info = daily_checkin(page)
+                if checkin_info.get("already") or checkin_info.get("ok"):
+                    state["checkin_date"] = today
+                    save_state(state)
+                if checkin_info.get("already"):
+                    log("签到 / checkin: 今日已签到 / already checked in today")
+                elif checkin_info.get("ok"):
+                    log("签到 / checkin: 签到成功 / checkin success")
+                else:
+                    log(f"签到 / checkin: 失败 {checkin_info}")
         except Exception as e:
             checkin_info = {"ok": False, "error": str(e)}
             log(f"签到异常 / checkin error: {e}")
@@ -364,7 +374,7 @@ def main():
         if not auth.get("loggedIn", True):
             log("!!! cookie 已失效 / session cookie expired, aborting")
             if ptoken:
-                send_pushplus(ptoken, "[cookie失效] linux.sb 会话过期", "linuxsb 脚本检测到 cookie 已失效，请用油猴脚本重新提取 cookie 并更新 ~/.config/linuxsb/config.json，然后手动运行一次验证。")
+                send_pushplus(ptoken, f"[cookie失效] linux.sb({username}) 会话过期", f"账号 {username} (uid={uid}) 的 linux.sb cookie 已失效，请用油猴脚本重新提取 cookie 并更新 ~/.config/linuxsb/config.json，然后手动运行一次验证。")
             browser.close()
             return
         if topics:
@@ -423,6 +433,7 @@ def main():
         log(">>> 中奖! / WON: " + "; ".join(f"#{w['tid']} {w['title'][:30]}" for w in won_list))
     summary = (
         f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        f"账号: {username} (uid={uid})\n"
         f"签到: {('今日已签到' if checkin_info and checkin_info.get('already') else ('成功' if checkin_info and checkin_info.get('ok') else '失败'))}\n"
         f"抽奖帖数: {len(topics)} | 成功: {ok} | 跳过: {skip} | 失败: {fail}\n"
     )
@@ -433,11 +444,11 @@ def main():
         for w in winner_results:
             wlines.append(f"{'中奖' if w['won'] else '未中'} #{w['tid']} {w['title'][:30]}")
         summary += "\n开奖结果 / lottery results:\n" + "\n".join(wlines)
-    log(f"汇总 / summary: 签到={summary.splitlines()[1]} 成功 ok={ok} 跳过 skip={skip} 失败 fail={fail} 开奖={len(winner_results)}")
+    log(f"汇总 / summary: 账号={username} 签到={summary.splitlines()[1]} 成功 ok={ok} 跳过 skip={skip} 失败 fail={fail} 开奖={len(winner_results)}")
     if ptoken:
-        title = f"linuxsb 签到{'成功' if checkin_info and checkin_info.get('ok') else '失败'} 回帖 成功{ok} 跳过{skip} 失败{fail}"
+        title = f"linuxsb[{username}] 签到{'成功' if checkin_info and checkin_info.get('ok') else '失败'} 回帖 成功{ok} 跳过{skip} 失败{fail}"
         if won_list:
-            title = f"[中奖] linuxsb 抽奖中了 {len(won_list)} 个!" 
+            title = f"[中奖] linuxsb[{username}] 抽奖中了 {len(won_list)} 个!" 
         content = summary + ("\n" + "\n".join(detail[-15:]) if detail else "")
         send_pushplus(ptoken, title, content)
     log("=== 结束 / finished ===")

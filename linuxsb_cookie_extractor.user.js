@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linux.sb 提取登录 cookie（给 linuxsb-auto-reply 用）
 // @namespace    yh594774855
-// @version      1.0.0
+// @version      1.1.0
 // @description  在 linux.sb 页面一键提取完整 document.cookie 与 UID，复制后填入 linuxsb-auto-reply 的 config.json。登录后打开任意 linux.sb 页面即可。
 // @match        *://linux.sb/*
 // @run-at       document-idle
@@ -91,19 +91,29 @@
 
     document.body.appendChild(panel);
 
+    let lastCookie = '';
+    let lastUid = '';
+
     function refreshAll() {
       const cookie = getCookieString();
       const uid = getUid();
       const ok = cookie.includes('bbs_auth=') && uid;
       status.textContent = ok ? `已登录（uid=${uid}）` : '未登录或未检测到 bbs_auth，请先登录';
       status.style.color = ok ? '#6ee7b7' : '#fca5a5';
-      ta.value = buildConfigBlock(cookie, uid);
+      // 仅 cookie/uid 变化时更新文本域，避免覆盖用户手动复制的文本
+      if (cookie !== lastCookie || uid !== lastUid) {
+        lastCookie = cookie;
+        lastUid = uid;
+        ta.value = buildConfigBlock(cookie, uid);
+      }
       copyCookie.onclick = () => { GM_setClipboard(cookie); status.textContent = '已复制 cookie'; };
       copyConfig.onclick = () => { GM_setClipboard(buildConfigBlock(cookie, uid)); status.textContent = '已复制 config.json'; };
     }
 
     refresh.onclick = refreshAll;
     refreshAll();
+    // 自动刷新：每 3 秒重读一次，登录/登出后无需手动点刷新
+    setInterval(refreshAll, 3000);
   }
 
   window.addEventListener('load', ensurePanel);

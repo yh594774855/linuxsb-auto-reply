@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         linux.sb 提取登录 cookie（给 linuxsb-auto-reply 用）
 // @namespace    yh594774855
-// @version      1.1.0
+// @version      1.1.1
 // @description  在 linux.sb 页面一键提取完整 document.cookie 与 UID，复制后填入 linuxsb-auto-reply 的 config.json。登录后打开任意 linux.sb 页面即可。
 // @match        *://linux.sb/*
 // @run-at       document-idle
@@ -24,10 +24,16 @@
   }
 
   function getUid() {
-    const a = document.querySelector('a[href*="/user/"]');
-    if (!a) return '';
-    const m = a.href.match(/\/user\/(\d+)/);
-    return m ? m[1] : '';
+    // 优先从 bbs_auth cookie 解析（格式 uid.timestamp.hash），这是最可靠的来源
+    const authMatch = (document.cookie.match(/(?:^|;\s*)bbs_auth=(\d+)/) || [])[1];
+    if (authMatch) return authMatch;
+    // 兜底：页面上指向当前用户的链接
+    const links = document.querySelectorAll('a[href^="/user/"], .nav-mine a[href^="/user/"], a.user-name');
+    for (const a of links) {
+      const m = a.href.match(/\/user\/(\d+)/);
+      if (m) return m[1];
+    }
+    return '';
   }
 
   function buildConfigBlock(cookie, uid) {

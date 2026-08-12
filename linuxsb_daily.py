@@ -10,14 +10,22 @@ Credentials (cookie / UID / PushPlus token) are read from env vars or config.jso
 """
 import os, sys, time, json, random
 import urllib.request
+import fcntl
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from playwright.sync_api import sync_playwright
 
 CONFIG_PATH = os.environ.get("LINUXSB_CONFIG", os.path.expanduser("~/.config/linuxsb/config.json"))
 STATE_PATH = os.environ.get("LINUXSB_STATE", os.path.expanduser("~/.config/linuxsb/state.json"))
-STATE_TTL_DAYS = int(os.environ.get("LINUXSB_STATE_TTL_DAYS", "3"))
+STATE_TTL_DAYS = int(os.environ.get("LINUXSB_STATE_TTL_DAYS", "30"))
 LOG_FILE = os.environ.get("LINUXSB_LOG", "/root/linuxsb_reply.log")
 DEFAULT_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+BJT = ZoneInfo("Asia/Shanghai")
+
+
+def now():
+    """论坛口径时间：固定 Asia/Shanghai，避免 cron 服务器时区漂移 / Forum-local time (BJT)."""
+    return datetime.now(BJT)
 
 
 def load_config():
@@ -32,7 +40,7 @@ def load_config():
             with open(CONFIG_PATH) as f:
                 cfg = json.load(f)
             cookie = cookie or cfg.get("cookie")
-            uid = uid or str(cfg.get("uid", ""))
+            uid = uid or str(cfg.get("uid") or "")
             ua = cfg.get("user_agent", ua)
             ptoken = ptoken or cfg.get("pushplus_token")
             username = username or cfg.get("username")
@@ -47,7 +55,7 @@ def load_config():
 
 
 def log(msg):
-    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    line = f"[{now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
     print(line, flush=True)
     try:
         with open(LOG_FILE, "a") as f:
@@ -95,28 +103,34 @@ def load_state():
 
 
 def save_state(state):
-    """原子写状态文件 / Atomically persist state."""
+    """原子写状态文件（flock 防并发丢失）/ Atomically persist state with flock."""
     try:
         os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-        tmp = STATE_PATH + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, STATE_PATH)
+        lock = STATE_PATH + ".lock"
+        with open(lock, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            tmp = STATE_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, STATE_PATH)
+            fcntl.flock(lf, fcntl.LOCK_UN)
     except Exception as e:
         log(f"保存状态失败 / save state failed: {e}")
 
 
 def cleanup_state(state):
     """清理超过 TTL 的记录 / Drop records older than TTL days."""
-    now = datetime.now()
+    now_ts = now()
     for tid in list(state.get("replies", {})):
         rec = state["replies"][tid]
         try:
-            replied = datetime.strptime(rec.get("replied_at", ""), "%Y-%m-%d %H:%M")
+            replied = datetime.strptime(rec.get("replied_at", ""), "%Y-%m-%d %H:%M").replace(tzinfo=BJT)
         except (ValueError, KeyError):
             del state["replies"][tid]
             continue
-        if (now - replied).days >= STATE_TTL_DAYS:
+        if (now_ts - replied).days >= STATE_TTL_DAYS:
             log(f"[{tid}] 清理记录(>{STATE_TTL_DAYS}天) / cleanup: {rec.get('title','')[:40]}")
             del state["replies"][tid]
 
@@ -128,7 +142,7 @@ def track_reply(state, tid, title, body):
         replies[tid] = {
             "title": title[:70],
             "body": body,
-            "replied_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "replied_at": now().strftime("%Y-%m-%d %H:%M"),
             "result": "pending",   # pending / won / lost
             "notified": False,
         }
@@ -156,7 +170,9 @@ def check_winners(page, uid, state):
                 });
                 return {status: status, winnerUids: uids};
             }""")
-            if "已开奖" in info["status"]:
+            status = info["status"]
+            is_terminal = ("已开奖" in status) or ("已结束" in status) or (("开奖" in status) and len(info["winnerUids"]) > 0)
+            if is_terminal:
                 won = str(uid) in info["winnerUids"]
                 rec["result"] = "won" if won else "lost"
                 rec["notified"] = True
@@ -274,14 +290,14 @@ def daily_checkin(page):
     resp = page.evaluate("""async () => {
         const fd = new FormData();
         fd.append('_csrf', document.querySelector('form.post-action-form input[name=_csrf]').value);
-        const r = await fetch('/daily_checkin', {method:'POST', body: fd, headers:{'X-Requested-With':'XMLHttpRequest'}});
-        return {status: r.status, head: (await r.text()).substring(0, 150)};
+        const ctl = new AbortController();
+        const to = setTimeout(() => ctl.abort(), 15000);
+        try {
+            const r = await fetch('/daily_checkin', {method:'POST', body: fd, headers:{'X-Requested-With':'XMLHttpRequest'}, signal: ctl.signal});
+            return {status: r.status, head: (await r.text()).substring(0, 150)};
+        } finally { clearTimeout(to); }
     }""")
-    time.sleep(2)
-    page.goto("https://linux.sb/daily_checkin", wait_until="domcontentloaded", timeout=20000)
-    time.sleep(2)
-    ok = page.evaluate("() => /今天已签到/.test(document.body.innerText)")
-    return {"ok": ok, "already": False, "status": resp.get("status"), "head": resp.get("head")}
+    return {"ok": bool(resp.get("status")), "already": False, "status": resp.get("status"), "head": resp.get("head")}
 
 
 def check_login(page, uid):
@@ -322,9 +338,13 @@ def process_topic(page, tid, title, uid):
     result = page.evaluate("""async (args) => {
         const fd = new FormData();
         fd.append('_csrf', args.csrf); fd.append('topic_id', args.topicId); fd.append('body', args.body);
-        const r = await fetch('/reply_edit', {method:'POST', body: fd, headers:{'X-Requested-With':'XMLHttpRequest'}});
-        const text = await r.text();
-        return {status: r.status, ok: text.indexOf('"ok":1')>=0, head: text.substring(0,120)};
+        const ctl = new AbortController();
+        const to = setTimeout(() => ctl.abort(), 15000);
+        try {
+            const r = await fetch('/reply_edit', {method:'POST', body: fd, headers:{'X-Requested-With':'XMLHttpRequest'}, signal: ctl.signal});
+            const text = await r.text();
+            return {status: r.status, ok: text.indexOf('"ok":1')>=0, head: text.substring(0,120)};
+        } finally { clearTimeout(to); }
     }""", {"csrf": info["csrf"], "topicId": info["topicId"], "body": body})
     return {"body": body, "ok": result["ok"], "status": result["status"], "head": result["head"]}
 
@@ -339,100 +359,118 @@ def main():
     checkin_info = None
     state = load_state()
     winner_results = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"])
-        ctx = browser.new_context(user_agent=ua, viewport={"width": 1280, "height": 800}, locale="zh-CN")
-        ctx.add_cookies(parse_cookies(cookie, ".linux.sb"))
-        page = ctx.new_page()
-        today = datetime.now().strftime("%Y-%m-%d")
-        try:
-            if state.get("checkin_date") == today:
-                checkin_info = {"ok": True, "already": True, "state_skip": True}
-                log("签到 / checkin: 今天已在 state 记录过，跳过 / already recorded in state today, skip")
-            else:
-                checkin_info = daily_checkin(page)
-                if checkin_info.get("already") or checkin_info.get("ok"):
-                    state["checkin_date"] = today
-                    save_state(state)
-                if checkin_info.get("already"):
-                    log("签到 / checkin: 今日已签到 / already checked in today")
-                elif checkin_info.get("ok"):
-                    log("签到 / checkin: 签到成功 / checkin success")
+    browser = None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"])
+            ctx = browser.new_context(user_agent=ua, viewport={"width": 1280, "height": 800}, locale="zh-CN")
+            ctx.add_cookies(parse_cookies(cookie, ".linux.sb"))
+            page = ctx.new_page()
+            today = now().strftime("%Y-%m-%d")
+            try:
+                if state.get("checkin_date") == today:
+                    checkin_info = {"ok": True, "already": True, "state_skip": True}
+                    log("签到 / checkin: 今天已在 state 记录过，跳过 / already recorded in state today, skip")
                 else:
-                    log(f"签到 / checkin: 失败 {checkin_info}")
-        except Exception as e:
-            checkin_info = {"ok": False, "error": str(e)}
-            log(f"签到异常 / checkin error: {e}")
-        topics = get_lottery_topics(page)
-        log(f"首页抽奖帖(未结束) / open lottery topics: {len(topics)}")
-        try:
-            auth = check_login(page, uid)
-            log(f"登录态 / login state: logged_in={auth['loggedIn']} hasUser={auth['hasUser']} hasLogin={auth['hasLogin']}")
-        except Exception as e:
-            auth = {"loggedIn": True}
-            log(f"登录态检测异常 / login check error: {e}")
-        if not auth.get("loggedIn", True):
-            log("!!! cookie 已失效 / session cookie expired, aborting")
-            if ptoken:
-                send_pushplus(ptoken, f"[cookie失效] linux.sb({username}) 会话过期", f"账号 {username} (uid={uid}) 的 linux.sb cookie 已失效，请用油猴脚本重新提取 cookie 并更新 ~/.config/linuxsb/config.json，然后手动运行一次验证。")
-            browser.close()
-            return
-        if topics:
-            ng = check_night(page, topics[0]["tid"])
-            night = ng["night"] or ng["turnstile"]
-            log(f"夜间守护 / night guard: night={ng['night']} turnstile={ng['turnstile']}")
-            if night:
-                log("夜间守护中，跳过本次（白天才回帖）/ night guard active, skipping (daytime only)")
-            else:
-                for t in topics:
-                    tid = t["tid"]; title = t["title"][:50]
-                    try:
-                        if tid in state.get("replies", {}) and state["replies"][tid].get("body"):
-                            log(f"[{tid}] skip=tracked(state) {title}")
-                            skip += 1
-                            detail.append(f"跳过(已记录) #{tid} {title[:24]}")
+                    checkin_info = daily_checkin(page)
+                    if checkin_info.get("already") or checkin_info.get("ok"):
+                        state["checkin_date"] = today
+                        save_state(state)
+                    if checkin_info.get("already"):
+                        log("签到 / checkin: 今日已签到 / already checked in today")
+                    elif checkin_info.get("ok"):
+                        log("签到 / checkin: 签到成功 / checkin success")
+                    else:
+                        log(f"签到 / checkin: 失败 {checkin_info}")
+            except Exception as e:
+                checkin_info = {"ok": False, "error": str(e)}
+                log(f"签到异常 / checkin error: {e}")
+            try:
+                topics = get_lottery_topics(page)
+                log(f"首页抽奖帖(未结束) / open lottery topics: {len(topics)}")
+            except Exception as e:
+                log(f"首页抓取失败 / homepage fetch error: {e}")
+            try:
+                auth = check_login(page, uid)
+                log(f"登录态 / login state: logged_in={auth['loggedIn']} hasUser={auth['hasUser']} hasLogin={auth['hasLogin']}")
+            except Exception as e:
+                auth = {"loggedIn": None}
+                log(f"登录态检测异常 / login check error: {e}")
+            if not auth.get("loggedIn"):
+                log("!!! cookie 已失效 / session cookie expired, aborting")
+                if ptoken:
+                    send_pushplus(ptoken, f"[cookie失效] linux.sb({username}) 会话过期", f"账号 {username} (uid={uid}) 的 linux.sb cookie 已失效，请用油猴脚本重新提取 cookie 并更新 ~/.config/linuxsb/config.json，然后手动运行一次验证。")
+                return
+            if topics:
+                try:
+                    ng = check_night(page, topics[0]["tid"])
+                    night = ng["night"] or ng["turnstile"]
+                    log(f"夜间守护 / night guard: night={ng['night']} turnstile={ng['turnstile']}")
+                except Exception as e:
+                    night = True  # 探测失败保守处理，避免夜间硬回帖
+                    log(f"夜间守护探测异常，保守跳过 / night check error: {e}")
+                if night:
+                    log("夜间守护中，跳过本次（白天才回帖）/ night guard active, skipping (daytime only)")
+                else:
+                    for t in topics:
+                        tid = t["tid"]; title = t["title"][:50]
+                        try:
+                            if tid in state.get("replies", {}) and state["replies"][tid].get("body"):
+                                log(f"[{tid}] skip=tracked(state) {title}")
+                                skip += 1
+                                detail.append(f"跳过(已记录) #{tid} {title[:24]}")
+                                time.sleep(3)
+                                continue
+                            r = process_topic(page, tid, title, uid)
+                            if r in ("ended", "no-form", "not-lottery"):
+                                log(f"[{tid}] skip={r} {title}")
+                                skip += 1
+                                detail.append(f"跳过({r}) #{tid} {title[:24]}")
+                            elif r == "replied":
+                                log(f"[{tid}] skip=replied {title}")
+                                skip += 1
+                                detail.append(f"跳过(replied) #{tid} {title[:24]}")
+                                track_reply(state, tid, title, "")
+                            elif isinstance(r, dict) and r.get("ok"):
+                                log(f"[{tid}] OK '{r['body']}' {title}")
+                                ok += 1
+                                detail.append(f"回帖成功 #{tid} {r['body']} | {title[:24]}")
+                                track_reply(state, tid, title, r["body"])
+                            else:
+                                log(f"[{tid}] FAIL {r} {title}")
+                                fail += 1
+                                detail.append(f"失败 #{tid} {title[:24]}")
                             time.sleep(3)
-                            continue
-                        r = process_topic(page, tid, title, uid)
-                        if r in ("ended", "no-form", "not-lottery"):
-                            log(f"[{tid}] skip={r} {title}")
-                            skip += 1
-                            detail.append(f"跳过({r}) #{tid} {title[:24]}")
-                        elif r == "replied":
-                            log(f"[{tid}] skip=replied {title}")
-                            skip += 1
-                            detail.append(f"跳过(replied) #{tid} {title[:24]}")
-                            track_reply(state, tid, title, "")
-                        elif isinstance(r, dict) and r.get("ok"):
-                            log(f"[{tid}] OK '{r['body']}' {title}")
-                            ok += 1
-                            detail.append(f"回帖成功 #{tid} {r['body']} | {title[:24]}")
-                            track_reply(state, tid, title, r["body"])
-                        else:
-                            log(f"[{tid}] FAIL {r} {title}")
+                        except Exception as e:
+                            log(f"[{tid}] ERROR {e}")
                             fail += 1
-                            detail.append(f"失败 #{tid} {title[:24]}")
-                        time.sleep(3)
-                    except Exception as e:
-                        log(f"[{tid}] ERROR {e}")
-                        fail += 1
-                        detail.append(f"异常 #{tid} {e}")
-        else:
-            log("无抽奖帖 / no lottery topics")
-        # 开奖结果检查（夜间也执行，只读页面）
-        try:
-            winner_results = check_winners(page, uid, state)
-            cleanup_state(state)
-            save_state(state)
-        except Exception as e:
-            log(f"开奖检查/状态保存异常 / winner check error: {e}")
-        browser.close()
+                            detail.append(f"异常 #{tid} {e}")
+            else:
+                log("无抽奖帖 / no lottery topics")
+            # 开奖结果检查（夜间也执行，只读页面）
+            try:
+                winner_results = check_winners(page, uid, state)
+                cleanup_state(state)
+                save_state(state)
+            except Exception as e:
+                log(f"开奖检查/状态保存异常 / winner check error: {e}")
+    except Exception as e:
+        log(f"!!! 顶层异常 / top-level error: {e}")
+        if ptoken:
+            send_pushplus(ptoken, f"[linuxsb异常] {username}", f"账号 {username} (uid={uid}) 脚本运行异常：{e}\n请检查 /root/linuxsb_reply.log")
+        return
+    finally:
+        if browser:
+            try:
+                browser.close()
+            except Exception:
+                pass
     won_list = [w for w in winner_results if w["won"]]
     lost_list = [w for w in winner_results if not w["won"]]
     if won_list:
         log(">>> 中奖! / WON: " + "; ".join(f"#{w['tid']} {w['title'][:30]}" for w in won_list))
     summary = (
-        f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        f"运行时间: {now().strftime('%Y-%m-%d %H:%M')}\n"
         f"账号: {username} (uid={uid})\n"
         f"签到: {('今日已签到' if checkin_info and checkin_info.get('already') else ('成功' if checkin_info and checkin_info.get('ok') else '失败'))}\n"
         f"抽奖帖数: {len(topics)} | 成功: {ok} | 跳过: {skip} | 失败: {fail}\n"
@@ -448,7 +486,7 @@ def main():
     if ptoken:
         title = f"linuxsb[{username}] 签到{'成功' if checkin_info and checkin_info.get('ok') else '失败'} 回帖 成功{ok} 跳过{skip} 失败{fail}"
         if won_list:
-            title = f"[中奖] linuxsb[{username}] 抽奖中了 {len(won_list)} 个!" 
+            title = f"[中奖] linuxsb[{username}] 抽奖中了 {len(won_list)} 个!"
         content = summary + ("\n" + "\n".join(detail[-15:]) if detail else "")
         send_pushplus(ptoken, title, content)
     log("=== 结束 / finished ===")
